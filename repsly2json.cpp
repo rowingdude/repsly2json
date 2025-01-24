@@ -4,6 +4,7 @@ I use this for compiling...
 
 g++ -Wall -Wextra -Werror -O2 -D_FORTIFY_SOURCE=2 -fstack-protector-strong -Wformat -Werror=format-security -fPIE -pie repsly2json.cpp -o repsly2json -lcurl -ljsoncpp -march=native -mtune=native
 
+Requires: JSON-C, LibPQxx, LibCURL
 */
 
 #include <iostream>
