@@ -15,8 +15,9 @@ Requires: JSON-C, LibPQxx, LibCURL
 #include <regex>
 #include <iomanip>
 #include <curl/curl.h>
-#include <json/json.h>
+#include <jsoncpp/json/json.h>
 #include <unistd.h>
+#include <sys/stat.h> // For mkdir
 
 constexpr char API_BASE[] = "https://api.repsly.com/v3/export";
 constexpr size_t MAX_URL_LEN = 512;
@@ -69,23 +70,30 @@ private:
        return size * nmemb;
    }
 
-   void constructUrl(std::string& url, const Endpoint& endpoint, const PaginationState& state) const {
-       char buffer[MAX_URL_LEN];
-       switch(endpoint.pagination) {
-           case PaginationType::SKIP:
-               snprintf(buffer, sizeof(buffer), endpoint.url_format.c_str(), 
-                       API_BASE, state.last_id.c_str(), state.skip);
-               break;
-           case PaginationType::DATE_RANGE:
-               snprintf(buffer, sizeof(buffer), endpoint.url_format.c_str(),
-                       API_BASE, state.current_date.c_str(), state.end_date.c_str());
-               break;
-           default:
-               snprintf(buffer, sizeof(buffer), endpoint.url_format.c_str(),
-                       API_BASE, state.last_id.c_str());
-       }
-       url = buffer;
-   }
+    void constructUrl(std::string& url, const Endpoint& endpoint, const PaginationState& state) const {
+        char buffer[MAX_URL_LEN];
+        switch(endpoint.pagination) {
+            case PaginationType::SKIP:
+                snprintf(buffer, sizeof(buffer), endpoint.url_format.c_str(), 
+                        API_BASE, state.last_id.c_str(), state.skip);
+                break;
+            case PaginationType::DATE_RANGE:
+                snprintf(buffer, sizeof(buffer), endpoint.url_format.c_str(),
+                        API_BASE, state.current_date.c_str(), state.end_date.c_str());
+                break;
+            case PaginationType::ID:
+            case PaginationType::TIMESTAMP:
+                snprintf(buffer, sizeof(buffer), endpoint.url_format.c_str(),
+                        API_BASE, state.last_id.c_str());
+                break;
+            case PaginationType::NONE:
+                snprintf(buffer, sizeof(buffer), endpoint.url_format.c_str(), API_BASE);
+                break;
+            default:
+                throw std::runtime_error("Unsupported pagination type");
+        }
+        url = buffer;
+    }
 
    bool updatePagination(const Endpoint& endpoint, const Json::Value& meta, 
                         const Json::Value& items, PaginationState& state, Progress& progress) {
@@ -174,7 +182,15 @@ private:
    }
 
    void saveJson(const std::string& filename, const Json::Value& json) {
-       std::ofstream(filename) << Json::StyledWriter().write(json);
+       // Ensure the json_dl directory exists
+       mkdir("json_dl", 0777);
+       std::ofstream file("json_dl/" + filename);
+       if (file.is_open()) {
+           Json::FastWriter writer;
+           file << writer.write(json);
+       } else {
+           std::cerr << "Failed to open file: " << filename << std::endl;
+       }
    }
 
    void reportProgress(const std::string& endpoint, const Progress& p) {
@@ -195,8 +211,8 @@ private:
             constructUrl(url, endpoint, state);
             
             if(auto page = fetchPage(url)) {
-                if(!page.isMember(endpoint.key) || !page.isMember("MetaCollectionResult")) break;
-                
+                if(!page.isMember(endpoint.key)) break; // Ensure the key exists in the response
+
                 if (page.isMember("MetaCollectionResult")) {
                     state.meta = page["MetaCollectionResult"];
                 }
@@ -208,7 +224,13 @@ private:
                     progress.total = meta["TotalCount"].asInt();
                 }
 
-                has_more = updatePagination(endpoint, meta, items, state, progress);
+                // Only update pagination if the endpoint requires it
+                if (endpoint.pagination != PaginationType::NONE) {
+                    has_more = updatePagination(endpoint, meta, items, state, progress);
+                } else {
+                    has_more = false; // No pagination, fetch only once
+                }
+
                 reportProgress(endpoint.name, progress);
                 usleep(DEFAULT_SLEEP_MS * 1000);
             } else break;
@@ -261,21 +283,30 @@ public:
 };
 
 const std::vector<Endpoint> RepslyClient::ENDPOINTS = {
-   {"pricelists", "%s/pricelists", "Pricelists", PaginationType::NONE},
-   {"clients", "%s/clients/%s?includeInactive=true&includeDeleted=true", "Clients", PaginationType::TIMESTAMP},
-   {"clientnotes", "%s/clientnotes/%s", "ClientNotes", PaginationType::ID},
-   {"representatives", "%s/representatives?includeInactive=true&includeDeleted=true", "Representatives", PaginationType::NONE},
-   {"forms", "%s/forms/%s", "Forms", PaginationType::ID},
-   {"users", "%s/users/%s?includeInactive=true", "Users", PaginationType::TIMESTAMP},
-   {"visits", "%s/visits/%s", "Visits", PaginationType::TIMESTAMP},
-   {"visitrealizations", "%s/visitrealizations?modified=%s&skip=%d", "VisitRealizations", PaginationType::SKIP},
-   {"visitschedules", "%s/visitschedules/%s/%s", "VisitSchedules", PaginationType::DATE_RANGE},
-   {"dailyworkingtime", "%s/dailyworkingtime/%s", "DailyWorkingTime", PaginationType::ID},
-   {"products", "%s/products/%s?includeInactive=true&includeDeleted=true", "Products", PaginationType::ID},
-   {"photos", "%s/photos/%s", "Photos", PaginationType::ID},
-   {"documentTypes", "%s/documentTypes?includeInactive=true", "DocumentTypes", PaginationType::NONE},
-   {"purchaseorders", "%s/purchaseorders/%s", "PurchaseOrders", PaginationType::ID},
-   {"retailaudits", "%s/retailaudits/%s", "RetailAudits", PaginationType::ID}
+    // No Pagination
+    {"pricelists", "%s/pricelists", "Pricelists", PaginationType::NONE},
+    {"representatives", "%s/representatives", "Representatives", PaginationType::NONE},
+    {"documentTypes", "%s/documentTypes?includeInactive=true", "DocumentTypes", PaginationType::NONE},
+
+    // ID Pagination
+    {"clientnotes", "%s/clientnotes/%s", "ClientNotes", PaginationType::ID},
+    {"forms", "%s/forms/%s", "Forms", PaginationType::ID},
+    {"dailyworkingtime", "%s/dailyworkingtime/%s", "DailyWorkingTime", PaginationType::ID},
+    {"products", "%s/products/%s?includeInactive=true&includeDeleted=true", "Products", PaginationType::ID},
+    {"photos", "%s/photos/%s", "Photos", PaginationType::ID},
+    {"purchaseorders", "%s/purchaseorders/%s", "PurchaseOrders", PaginationType::ID},
+    {"retailaudits", "%s/retailaudits/%s", "RetailAudits", PaginationType::ID},
+
+    // Timestamp Pagination
+    {"clients", "%s/clients/%s?includeInactive=true&includeDeleted=true", "Clients", PaginationType::TIMESTAMP},
+    {"users", "%s/users/%s?includeInactive=true", "Users", PaginationType::TIMESTAMP},
+    {"visits", "%s/visits/%s", "Visits", PaginationType::TIMESTAMP},
+
+    // Skip Pagination
+    {"visitrealizations", "%s/visitrealizations?modified=%s&skip=%d", "VisitRealizations", PaginationType::SKIP},
+
+    // Date Range Pagination
+    {"visitschedules", "%s/visitschedules/%s/%s", "VisitSchedules", PaginationType::DATE_RANGE}
 };
 
 int main() {
