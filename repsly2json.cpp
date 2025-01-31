@@ -17,9 +17,7 @@ Requires: JSON-C, LibPQxx, LibCURL
 #include <curl/curl.h>
 #include <jsoncpp/json/json.h>
 #include <unistd.h>
-#include <sys/stat.h> // For mkdir
 
-constexpr char API_BASE[] = "https://api.repsly.com/v3/export";
 constexpr size_t MAX_URL_LEN = 512;
 constexpr size_t MAX_CONFIG_LEN = 1024;
 constexpr int DEFAULT_SLEEP_MS = 300;
@@ -181,17 +179,31 @@ private:
        return root;
    }
 
-   void saveJson(const std::string& filename, const Json::Value& json) {
-       // Ensure the json_dl directory exists
-       mkdir("json_dl", 0777);
-       std::ofstream file("json_dl/" + filename);
-       if (file.is_open()) {
-           Json::FastWriter writer;
-           file << writer.write(json);
-       } else {
-           std::cerr << "Failed to open file: " << filename << std::endl;
-       }
-   }
+    void saveJson(const std::string& filename, const Json::Value& json) {
+        mkdir("json_dl", 0777);
+        std::ofstream file("json_dl/" + filename);
+        if (file.is_open()) {
+            Json::FastWriter writer;
+            file << writer.write(json);
+        } else {
+            std::cerr << "Failed to open file: " << filename << std::endl;
+        }
+    }
+
+    void savePricelistItems(const std::string& pricelistId, const Json::Value& pricelistItemsData) {
+        mkdir("json_dl", 0777); 
+        std::string filename = "repsly_pricelistsItems_" + pricelistId + "_raw.json";
+        std::string filepath = "json_dl/" + filename;
+        std::ofstream file(filepath);
+        if (file.is_open()) {
+            Json::FastWriter writer;
+            file << writer.write(pricelistItemsData);
+            file.close(); 
+            std::cout << "Saved pricelistItems for pricelistId " << pricelistId << " to " << filepath << std::endl;
+        } else {
+            std::cerr << "Failed to open file: " << filepath << std::endl;
+        }
+    }
 
    void reportProgress(const std::string& endpoint, const Progress& p) {
        std::cout << "\r" << std::left << std::setw(20) << endpoint;
@@ -200,43 +212,61 @@ private:
        std::cout << "    \r" << std::flush;
    }
 
-    Json::Value fetchEndpoint(const Endpoint& endpoint) {
+    Json::Value fetchEndpoint(const Endpoint& endpoint, PaginationState state = PaginationState()) {
         Json::Value responses(Json::arrayValue);
         Progress progress;
-        PaginationState state;
         bool has_more = true;
 
-        while(has_more) {
+        while (has_more) {
             std::string url;
             constructUrl(url, endpoint, state);
-            
-            if(auto page = fetchPage(url)) {
-                if(!page.isMember(endpoint.key)) break; // Ensure the key exists in the response
+
+            if (auto page = fetchPage(url)) {
+                if (!page.isMember(endpoint.key)) break; 
 
                 if (page.isMember("MetaCollectionResult")) {
                     state.meta = page["MetaCollectionResult"];
                 }
-                responses.append(page);
+
+                if (endpoint.name == "pricelists") {
+                    const Json::Value& pricelists = page[endpoint.key];
+                    for (const auto& pricelist : pricelists) {
+                        if (pricelist.isMember("pricelistId")) {
+                            std::string pricelistId = pricelist["pricelistId"].asString();
+
+
+                            Endpoint pricelistItemsEndpoint = {"pricelistsItems", "%s/pricelistsItems/%s", "PricelistsItems", PaginationType::NONE};
+                            PaginationState pricelistItemsState;
+                            pricelistItemsState.last_id = pricelistId; 
+
+                            Json::Value pricelistItemsResponse = fetchEndpoint(pricelistItemsEndpoint, pricelistItemsState);
+                            if (!pricelistItemsResponse.empty()) {
+
+                                savePricelistItems(pricelistId, pricelistItemsResponse);
+                            }
+                        }
+                    }
+                } else {
+                    responses.append(page);
+                }
                 auto& items = page[endpoint.key];
                 auto& meta = page["MetaCollectionResult"];
 
-                if(!progress.total && meta.isMember("TotalCount")) {
+                if (!progress.total && meta.isMember("TotalCount")) {
                     progress.total = meta["TotalCount"].asInt();
                 }
 
-                // Only update pagination if the endpoint requires it
-                if (endpoint.pagination != PaginationType::NONE) {
+               if (endpoint.pagination != PaginationType::NONE) {
                     has_more = updatePagination(endpoint, meta, items, state, progress);
                 } else {
-                    has_more = false; // No pagination, fetch only once
-                }
 
+                }
                 reportProgress(endpoint.name, progress);
                 usleep(DEFAULT_SLEEP_MS * 1000);
             } else break;
         }
         std::cout << std::endl;
-        
+
         Json::Value output;
         output["MetaCollectionResult"] = state.meta;
         output["Data"] = responses;
@@ -258,14 +288,20 @@ public:
        if(curl) curl_easy_cleanup(curl);
    }
 
-   void fetchAll() {
-       for(const auto& endpoint : ENDPOINTS) {
-           std::cout << "Processing " << endpoint.name << "...\n";
-           if(auto data = fetchEndpoint(endpoint)) {
-               saveJson("repsly_" + endpoint.name + "_raw.json", data);
-           }
-       }
-   }
+    void fetchAll() {
+        for (const auto& endpoint : ENDPOINTS) {
+            std::cout << "Processing " << endpoint.name << "...\n";
+            if (auto data = fetchEndpoint(endpoint)) {
+                if (endpoint.name == "pricelists") {
+
+                    saveJson("repsly_pricelists_raw.json", data);
+                } else {
+
+                    saveJson("repsly_" + endpoint.name + "_raw.json", data);
+                }
+            }
+        }
+    }
 
    static std::pair<std::string, std::string> readConfig(const std::string& path) {
        std::ifstream file(path);
@@ -283,12 +319,11 @@ public:
 };
 
 const std::vector<Endpoint> RepslyClient::ENDPOINTS = {
-    // No Pagination
+
     {"pricelists", "%s/pricelists", "Pricelists", PaginationType::NONE},
+    {"pricelistsItems", "%s/pricelistsItems/%s", "PricelistsItems", PaginationType::NONE},
     {"representatives", "%s/representatives", "Representatives", PaginationType::NONE},
     {"documentTypes", "%s/documentTypes?includeInactive=true", "DocumentTypes", PaginationType::NONE},
-
-    // ID Pagination
     {"clientnotes", "%s/clientnotes/%s", "ClientNotes", PaginationType::ID},
     {"forms", "%s/forms/%s", "Forms", PaginationType::ID},
     {"dailyworkingtime", "%s/dailyworkingtime/%s", "DailyWorkingTime", PaginationType::ID},
@@ -296,16 +331,10 @@ const std::vector<Endpoint> RepslyClient::ENDPOINTS = {
     {"photos", "%s/photos/%s", "Photos", PaginationType::ID},
     {"purchaseorders", "%s/purchaseorders/%s", "PurchaseOrders", PaginationType::ID},
     {"retailaudits", "%s/retailaudits/%s", "RetailAudits", PaginationType::ID},
-
-    // Timestamp Pagination
     {"clients", "%s/clients/%s?includeInactive=true&includeDeleted=true", "Clients", PaginationType::TIMESTAMP},
     {"users", "%s/users/%s?includeInactive=true", "Users", PaginationType::TIMESTAMP},
     {"visits", "%s/visits/%s", "Visits", PaginationType::TIMESTAMP},
-
-    // Skip Pagination
     {"visitrealizations", "%s/visitrealizations?modified=%s&skip=%d", "VisitRealizations", PaginationType::SKIP},
-
-    // Date Range Pagination
     {"visitschedules", "%s/visitschedules/%s/%s", "VisitSchedules", PaginationType::DATE_RANGE}
 };
 
