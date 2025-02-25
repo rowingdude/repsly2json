@@ -1,6 +1,7 @@
 // Compilation command:
 // g++ -Wall -Wextra -Werror -O2 -D_FORTIFY_SOURCE=2 -fstack-protector-strong -Wformat -Werror=format-security -fPIE -pie repsly2json.cpp -o repsly2json -lcurl -ljsoncpp -march=native -mtune=native
 
+
 #include <iostream>
 #include <fstream>
 #include <string>
@@ -54,6 +55,7 @@ namespace Repsly {
         CURL* curl_ = nullptr;
         std::string username_;
         std::string password_;
+        bool no_pagination_ = false;
         inline static const std::vector<Endpoint> ENDPOINTS = {
             {"pricelists", "%s/pricelists", "Pricelists", PaginationType::NONE},
             {"pricelistsItems", "%s/pricelistsItems/%s", "PricelistsItems", PaginationType::NONE},
@@ -203,53 +205,77 @@ namespace Repsly {
         Json::Value fetchEndpoint(const Endpoint& endpoint, PaginationState state = {}) {
             Json::Value responses(Json::arrayValue);
             Progress progress;
-            bool has_more = true;
-
-            while (has_more) {
-                std::string url = constructUrl(endpoint, state);
-                Json::Value page = fetchPage(url);
-                if (!page || !page.isMember(endpoint.key)) break;
-
-                if (page.isMember("MetaCollectionResult")) {
-                    state.meta = page["MetaCollectionResult"];
-                }
-
-                if (endpoint.name == "pricelists") {
-                    for (const auto& pricelist : page[endpoint.key]) {
-                        if (pricelist.isMember("pricelistId")) {
-                            std::string pricelistId = pricelist["pricelistId"].asString();
-                            Endpoint items_endpoint{"pricelistsItems", "%s/pricelistsItems/%s", "PricelistsItems", PaginationType::NONE};
-                            PaginationState items_state{.last_id = pricelistId};
-                            Json::Value items = fetchEndpoint(items_endpoint, items_state);
-                            if (!items.empty()) {
-                                saveJson("repsly_pricelistsItems_" + pricelistId + "_raw.json", items);
-                            }
+    
+            std::string url = constructUrl(endpoint, state);
+            Json::Value page = fetchPage(url);
+            if (!page || !page.isMember(endpoint.key)) {
+                std::cout << "Endpoint " << endpoint.name << " failed or returned no data\n";
+                return Json::Value();
+            }
+    
+            if (page.isMember("MetaCollectionResult")) {
+                state.meta = page["MetaCollectionResult"];
+            }
+    
+            if (endpoint.name == "pricelists") {
+                for (const auto& pricelist : page[endpoint.key]) {
+                    if (pricelist.isMember("pricelistId")) {
+                        std::string pricelistId = pricelist["pricelistId"].asString();
+                        Endpoint items_endpoint{"pricelistsItems", "%s/pricelistsItems/%s", "PricelistsItems", PaginationType::NONE};
+                        PaginationState items_state{.last_id = pricelistId};
+                        Json::Value items = fetchEndpoint(items_endpoint, items_state);
+                        if (!items.empty()) {
+                            saveJson("repsly_pricelistsItems_" + pricelistId + "_raw.json", items);
                         }
                     }
-                } else {
+                }
+            } else {
+                responses.append(page);
+            }
+    
+            progress.processed += page[endpoint.key].size();
+            const auto& meta = page["MetaCollectionResult"];
+            if (meta.isMember("TotalCount")) {
+                progress.total = meta["TotalCount"].asInt();
+            }
+    
+            // Only paginate if no_pagination_ is false
+            if (!no_pagination_ && endpoint.pagination != PaginationType::NONE) {
+                bool has_more = true;
+                while (has_more) {
+                    url = constructUrl(endpoint, state);
+                    page = fetchPage(url);
+                    if (!page || !page.isMember(endpoint.key)) break;
+    
+                    if (page.isMember("MetaCollectionResult")) {
+                        state.meta = page["MetaCollectionResult"];
+                    }
                     responses.append(page);
+    
+                    const auto& items = page[endpoint.key];
+                    const auto& meta_loop = page["MetaCollectionResult"];
+                    if (!progress.total && meta_loop.isMember("TotalCount")) {
+                        progress.total = meta_loop["TotalCount"].asInt();
+                    }
+    
+                    has_more = updatePagination(endpoint, meta_loop, items, state, progress);
+                    reportProgress(endpoint.name, progress);
+                    std::this_thread::sleep_for(std::chrono::milliseconds(DEFAULT_SLEEP_MS));
                 }
-
-                const auto& items = page[endpoint.key];
-                const auto& meta = page["MetaCollectionResult"];
-                if (!progress.total && meta.isMember("TotalCount")) {
-                    progress.total = meta["TotalCount"].asInt();
-                }
-
-                has_more = (endpoint.pagination == PaginationType::NONE) ? false : updatePagination(endpoint, meta, items, state, progress);
-                reportProgress(endpoint.name, progress);
-                std::this_thread::sleep_for(std::chrono::milliseconds(DEFAULT_SLEEP_MS));
+            } else {
+                reportProgress(endpoint.name, progress); // Show progress for single call
             }
             std::cout << std::endl;
-
+    
             Json::Value output;
             output["MetaCollectionResult"] = state.meta;
             output["Data"] = responses;
             return output;
         }
-
+    
     public:
-        explicit Client(const std::string& config_path) {
+        explicit Client(const std::string& config_path, bool no_pagination = false)
+            : no_pagination_(no_pagination) { // Initialize the flag
             auto [user, pass] = readConfig(config_path);
             if (user.empty() || pass.empty()) {
                 throw std::runtime_error("Invalid credentials in " + config_path);
@@ -261,16 +287,17 @@ namespace Repsly {
                 throw std::runtime_error("Failed to initialize CURL");
             }
         }
-
+    
         ~Client() {
             if (curl_) curl_easy_cleanup(curl_);
         }
-
+    
         Client(const Client&) = delete;
         Client& operator=(const Client&) = delete;
-
+    
         void fetchAll() {
             for (const auto& endpoint : ENDPOINTS) {
+                if (endpoint.name == "pricelistsItems") continue; // Skip standalone pricelistsItems
                 std::cout << "Processing " << endpoint.name << "...\n";
                 Json::Value data = fetchEndpoint(endpoint);
                 if (!data.empty()) {
@@ -278,7 +305,6 @@ namespace Repsly {
                 }
             }
         }
-
         static std::pair<std::string, std::string> readConfig(const std::string& path) {
             std::ifstream file(path);
             if (!file) {
@@ -299,9 +325,14 @@ namespace Repsly {
     };
 } // namespace Repsly
 
-int main() {
+int main(int argc, char* argv[]) {
+    bool no_pagination = false;
+    if (argc > 1 && std::string(argv[1]) == "--no-pagination") {
+        no_pagination = true;
+    }
+
     try {
-        Repsly::Client client("/etc/api/config.conf");
+        Repsly::Client client("/etc/api/config.conf", no_pagination);
         client.fetchAll();
     } catch (const std::exception& e) {
         std::cerr << "Error: " << e.what() << std::endl;
