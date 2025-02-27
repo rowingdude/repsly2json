@@ -17,14 +17,13 @@
 namespace fs = std::filesystem;
 
 namespace Repsly {
-    // Constants
     constexpr size_t MAX_URL_LEN = 512;
     constexpr int DEFAULT_SLEEP_MS = 300;
     constexpr char API_BASE[] = "https://api.repsly.com/v3/export";
     constexpr char DEFAULT_START_DATE[] = "2020-01-01";
     constexpr char DEFAULT_END_DATE[] = "2020-12-31";
     static bool debug_enabled = false;
-    static std::ofstream debug_log;  // File stream for debug output
+    static std::ofstream debug_log; 
 
     enum class PaginationType { NONE, ID, TIMESTAMP, SKIP, DATE_RANGE };
 
