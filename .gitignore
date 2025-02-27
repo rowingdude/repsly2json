@@ -1,5 +1,8 @@
 # Compiled binaries and object files
 repsly2json
+json_dl/
+repsly2json_debug.log
+/etc/api/config.conf
 *.o
 *.obj
 *.exe
