@@ -1,0 +1,55 @@
+# Compiled binaries and object files
+repsly2json
+*.o
+*.obj
+*.exe
+*.out
+
+# Dependency libraries and build artifacts
+*.a
+*.so
+*.dylib
+*.lib
+*.dll
+*.dep
+*.d
+
+# Build directories
+build/
+dist/
+json_dl/
+
+# Debug and log files
+repsly2json_debug.log
+*.log
+core
+*.core
+*.dump
+
+# Editor and IDE files
+*.swp
+*.swo
+*~
+.vscode/
+.idea/
+*.sublime-project
+*.sublime-workspace
+
+# Dependency management and package files
+deps/
+vendor/
+*.lock
+
+# Configuration files with sensitive data
+/etc/api/config.conf
+
+# Temporary files
+*.tmp
+*.bak
+*.cache
+
+# macOS-specific files
+.DS_Store
+
+# Windows-specific files
+Thumbs.db
