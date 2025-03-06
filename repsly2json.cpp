@@ -103,7 +103,7 @@ namespace Repsly {
                 default:
                     throw std::runtime_error("Unsupported pagination type");
             }
-            if (written < 0 || written >= MAX_URL_LEN) {
+            if (written < 0 || static_cast<size_t>(written) >= MAX_URL_LEN) {
                 throw std::runtime_error("URL construction failed: buffer overflow");
             }
             return std::string(buffer);
@@ -222,7 +222,7 @@ namespace Repsly {
                     if (pricelist.isMember("pricelistId")) {
                         std::string pricelistId = pricelist["pricelistId"].asString();
                         Endpoint items_endpoint{"pricelistsItems", "%s/pricelistsItems/%s", "PricelistsItems", PaginationType::NONE};
-                        PaginationState items_state{.last_id = pricelistId};
+                        PaginationState items_state{DEFAULT_START_DATE, DEFAULT_END_DATE, pricelistId, 0, Json::Value()};
                         Json::Value items = fetchEndpoint(items_endpoint, items_state);
                         if (!items.empty()) {
                             saveJson("repsly_pricelistsItems_" + pricelistId + "_raw.json", items);
